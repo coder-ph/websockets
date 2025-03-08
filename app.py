@@ -1,3 +1,6 @@
+import eventlet
+eventlet.monkey_patch()  # Must be called before importing other modules
+
 from flask import Flask
 from flask_socketio import SocketIO, emit
 from flask_sqlalchemy import SQLAlchemy
@@ -5,8 +8,7 @@ import jwt
 from datetime import datetime
 import time
 from threading import Thread
-import eventlet
-eventlet.monkey_patch()
+
 app = Flask(__name__)
 app.config["SECRET_KEY"] = "your_secret_key"
 app.config["SQLALCHEMY_DATABASE_URI"] = "sqlite:///user_locations.db"
@@ -31,8 +33,11 @@ print("Database model defined.")
 
 # Create the database and tables
 with app.app_context():
-    db.create_all()
-    print("Database and tables created.")
+    try:
+        db.create_all()
+        print("Database and tables created.")
+    except Exception as e:
+        print(f"Error creating database: {e}")
 
 # Mock function to validate the token
 def validate_token(token):
@@ -48,15 +53,18 @@ print("Token validation function defined.")
 
 # Function to broadcast user locations periodically
 def broadcast_user_locations():
-    with app.app_context():  # Push application context
-        while True:
-            time.sleep(5)
-            users = UserLocation.query.all()
-            socketio.emit("userLocationUpdate", [{
-                "user_id": user.user_id,
-                "position": [user.latitude, user.longitude],
-                "timestamp": user.timestamp.isoformat()
-            } for user in users])
+    while True:
+        time.sleep(5)
+        try:
+            with app.app_context():  # Ensure application context is active
+                users = UserLocation.query.all()
+                socketio.emit("userLocationUpdate", [{
+                    "user_id": user.user_id,
+                    "position": [user.latitude, user.longitude],
+                    "timestamp": user.timestamp.isoformat()
+                } for user in users])
+        except Exception as e:
+            print(f"Error broadcasting user locations: {e}")
 
 print("Broadcast function defined.")
 
@@ -67,22 +75,32 @@ def handle_update_location(data):
     latitude = data.get("latitude")
     longitude = data.get("longitude")
 
+    # Validate token
     user_id = validate_token(token)
     if not user_id:
         emit("error", {"message": "Invalid or expired token"})
         return
 
-    user = UserLocation.query.filter_by(user_id=user_id).first()
-    if user:
-        user.latitude = latitude
-        user.longitude = longitude
-        user.timestamp = datetime.utcnow()
-    else:
-        user = UserLocation(user_id=user_id, latitude=latitude, longitude=longitude)
-        db.session.add(user)
-    db.session.commit()
+    # Validate latitude and longitude
+    if not (-90 <= latitude <= 90) or not (-180 <= longitude <= 180):
+        emit("error", {"message": "Invalid latitude or longitude"})
+        return
 
-    print(f"Updated location for user {user_id}: ({latitude}, {longitude})")
+    try:
+        user = UserLocation.query.filter_by(user_id=user_id).first()
+        if user:
+            user.latitude = latitude
+            user.longitude = longitude
+            user.timestamp = datetime.utcnow()
+        else:
+            user = UserLocation(user_id=user_id, latitude=latitude, longitude=longitude)
+            db.session.add(user)
+        db.session.commit()
+        print(f"Updated location for user {user_id}: ({latitude}, {longitude})")
+    except Exception as e:
+        db.session.rollback()
+        emit("error", {"message": "Failed to update location"})
+        print(f"Error updating location: {e}")
 
 print("WebSocket event handlers defined.")
 
